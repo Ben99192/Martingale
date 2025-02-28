@@ -1,6 +1,7 @@
 import abc
 import numpy as np
 from scipy.stats import gaussian_kde
+from p_values import PValueCalculator
 
 
 class BaseMartingale(abc.ABC):
@@ -12,28 +13,39 @@ class BaseMartingale(abc.ABC):
 
 
 class PowerMartingale(BaseMartingale):
-    """Stateful Callable Power Martingale."""
+    """Power Martingale with reset functionality after threshold exceedance."""
 
-    def __init__(self, epsilon: float):
+    def __init__(
+        self, epsilon: float, threshold: float, p_value_calculator: PValueCalculator
+    ):
         self.epsilon: float = epsilon
-        self.cumprod: float = 1.0  # Martingale starts at 1
+        self.threshold: float = threshold
+        self.cumprod: float = 1.0
+        self.p_value_calculator = p_value_calculator
 
     def __call__(self, p_val: float):
-        """Updates the Martingale value based on the p-value."""
-        self.cumprod *= self.epsilon * p_val ** (self.epsilon - 1)
+        """Updates the Martingale value and resets it if it exceeds the threshold."""
+        self.cumprod *= self.epsilon * max(p_val, 1e-10) ** (self.epsilon - 1)
+
+        if self.cumprod > self.threshold:  # If threshold exceeded, reset
+            print("🚨 Anomaly detected! Resetting Martingale.")
+            print(self.cumprod)
+            self.cumprod = 1.0  # Reset Martingale
+            self.p_value_calculator.reset_T()
+
         return self.cumprod
 
 
 class MixtureMartingale(BaseMartingale):
     """Mixture Martingale combines multiple Power Martingales."""
 
-    def __init__(self, epsilons=None, num_epsilons=100):
+    def __init__(self, epsilons=None, num_epsilons=100, threshold=10):
         if epsilons is None:
             self.epsilons = np.linspace(0.01, 1.0, num_epsilons)
         else:
             self.epsilons = epsilons
 
-        self.martingales = [PowerMartingale(eps) for eps in self.epsilons]
+        self.martingales = [PowerMartingale(eps, threshold) for eps in self.epsilons]
 
     def __call__(self, p_val: float):
         """Computes the mixture Martingale by averaging multiple Power Martingales."""
@@ -57,16 +69,26 @@ class SPRTMartingale(BaseMartingale):
 
 
 class MultiViewMartingale(BaseMartingale):
-    """Multi-View Martingale combines multiple feature-based Martingales."""
+    """Multi-View Martingale resets if any view exceeds the threshold."""
 
-    def __init__(self, num_views: int, epsilon: float):
+    def __init__(self, num_views: int, epsilon: float, threshold: float):
         self.num_views = num_views
-        self.martingales = [PowerMartingale(epsilon) for _ in range(num_views)]
+        self.threshold = threshold
+        self.martingales = [
+            PowerMartingale(epsilon, threshold) for _ in range(num_views)
+        ]
 
     def __call__(self, p_values: list):
-        """Computes the maximum Martingale value across multiple feature views."""
-        assert len(p_values) == self.num_views, "Incorrect number of p-values!"
-        return max(m(p) for m, p in zip(self.martingales, p_values))
+        """Computes the max Martingale across views and resets if needed."""
+
+        max_martingale = max(m(p) for m, p in zip(self.martingales, p_values))
+
+        if max_martingale > self.threshold:
+            print("🚨 Anomaly detected across multiple views! Resetting Martingales.")
+            for m in self.martingales:
+                m.cumprod = 1.0  # Reset all Martingales in Multi-View setting
+
+        return max_martingale
 
 
 class PluginMartingale(BaseMartingale):
@@ -87,5 +109,5 @@ class PluginMartingale(BaseMartingale):
         kde = gaussian_kde(self.p_values)
         rho_p = kde.evaluate(p_val)[0]  # Density estimate at p_val
 
-        self.cumprod *= rho_p  # Adjust Martingale value
+        self.cumprod *= self.epsilon * rho_p
         return self.cumprod
